@@ -308,9 +308,9 @@ def main():
         print_eval=False,
         mixed_precision=use_amp,
         test_sentences=[
-            "வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்?",
-            "இந்த இயந்திர கற்றல் மாதிரி மிகவும் நன்றாக வேலை செய்கிறது.",
-            "புதிய தொழில்நுட்பத்தை கற்பது மகிழ்ச்சி தருகிறது."
+            "nettikumatjanum",
+            "poɲtʃaɾumiʂaŋkaɭukkuteɾijamakaɳamappotʃu",
+            "mattijanaonramaɳikkuennaʋejilaʈikanumjostɾippaɾuŋka"
         ],
         output_path=OUT_DIR,
         datasets=[dataset_config],
