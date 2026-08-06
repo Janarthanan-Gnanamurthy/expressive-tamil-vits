@@ -177,7 +177,8 @@ def main():
                 x_tst_lengths = torch.LongTensor([stn_tst.size(0)]).to(device)
                 audio = (
                     net_g.infer(
-                        x_tst, x_tst_lengths, noise_scale=0.667, noise_scale_w=0.8, length_scale=1
+                        x_tst, x_tst_lengths, 
+                        # noise_scale=0.667, noise_scale_w=0.8, length_scale=1
                     )[0][0, 0]
                     .data.cpu()
                     .float()
