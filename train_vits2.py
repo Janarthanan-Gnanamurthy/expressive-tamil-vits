@@ -123,7 +123,16 @@ def patch_dataloader_workers(num_workers):
     original = train_py.read_text(encoding="utf-8")
     import re
 
-    patched, count = re.subn(r"num_workers=\d+,", f"num_workers={num_workers},", original)
+    # Remove any existing patched flags to prevent duplicates on re-runs
+    text = re.sub(r"persistent_workers=(?:True|False)\s*,\s*", "", original)
+    text = re.sub(r"pin_memory=(?:True|False)\s*,\s*", "", text)
+
+    persistent = "True" if num_workers > 0 else "False"
+    patched, count = re.subn(
+        r"num_workers=\d+,",
+        f"num_workers={num_workers}, persistent_workers={persistent}, pin_memory=True,",
+        text
+    )
     if count == 0:
         print(f"Warning: no 'num_workers=<N>,' pattern found in {train_py.name}; skipping patch.")
         return
@@ -242,6 +251,23 @@ def patch_skip_ddp_single_gpu():
         )
 
 
+def patch_cudnn_benchmark():
+    """Disable cuDNN benchmark to prevent spiky GPU usage with variable length inputs.
+
+    With variable length audio sequences, cuDNN benchmark forces the GPU to
+    re-benchmark convolution algorithms for almost every batch, causing massive
+    stalls and very spiky, low overall GPU utilization.
+    """
+    train_py = BACKEND_DIR / "train.py"
+    if not train_py.is_file():
+        return
+    original = train_py.read_text(encoding="utf-8")
+    patched = original.replace("torch.backends.cudnn.benchmark = True", "torch.backends.cudnn.benchmark = False")
+    if patched != original:
+        print(f"Patched {train_py.name}: torch.backends.cudnn.benchmark -> False (prevent spiky GPU usage).")
+        train_py.write_text(patched, encoding="utf-8")
+
+
 def verify_windows_patches():
     """Fail loudly if any Windows compatibility patch didn't actually stick.
 
@@ -268,6 +294,8 @@ def verify_windows_patches():
         problems.append("DDP-bypass class was not inserted into train.py.")
     if re.search(r"DDP\(\s*net_g\s*,", text):
         problems.append("DDP-bypass patch did not apply (still finds 'DDP(net_g, ...)').")
+    if "torch.backends.cudnn.benchmark = True" in text:
+        problems.append("cuDNN benchmark patch did not apply (still finds 'benchmark = True').")
     if problems:
         raise RuntimeError(
             "Windows compatibility patches did not fully apply to "
@@ -440,6 +468,7 @@ def main():
     patch_windows_distributed_backend()
     patch_find_unused_parameters()
     patch_skip_ddp_single_gpu()
+    patch_cudnn_benchmark()
     verify_windows_patches()
     dataset_dir = Path(args.dataset_dir)
     records = read_metadata(dataset_dir / args.metadata, dataset_dir)
