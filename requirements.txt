@@ -17,3 +17,5 @@ onnxruntime-gpu
 lhotse
 peft
 accelerate
+Unidecode
+phonemizer
