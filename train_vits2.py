@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-VENV_PYTHON = PROJECT_DIR / "veenv" / "Scripts" / "python.exe"
+VENV_PYTHON = PROJECT_DIR / "venv" / "Scripts" / "python.exe"
 BACKEND_DIR = PROJECT_DIR / "vits2_pytorch"
 BACKEND_URL = "https://github.com/p0p4k/vits2_pytorch.git"
 MODEL_NAME = "tamil_vits2"
@@ -67,6 +67,15 @@ def parse_args():
             "caused by nesting DataLoader worker spawns inside train.py's own "
             "mp.spawn() DDP process once CUDA is initialized. Raise this only if "
             "you've confirmed your setup tolerates nested multiprocessing."
+        ),
+    )
+    parser.add_argument(
+        "--cudnn_benchmark",
+        action="store_true",
+        help=(
+            "Enable cuDNN convolution autotuning. This can improve throughput after "
+            "the initial warm-up, especially with cached audio and a single GPU, but "
+            "may use more GPU memory and make the first batches slower."
         ),
     )
     parser.add_argument(
@@ -251,24 +260,68 @@ def patch_skip_ddp_single_gpu():
         )
 
 
-def patch_cudnn_benchmark():
-    """Disable cuDNN benchmark to prevent spiky GPU usage with variable length inputs.
+def patch_single_gpu_spawn():
+    """Avoid a redundant mp.spawn process for a one-GPU Windows run.
 
-    With variable length audio sequences, cuDNN benchmark forces the GPU to
-    re-benchmark convolution algorithms for almost every batch, causing massive
-    stalls and very spiky, low overall GPU utilization.
+    The backend launches one child process per GPU even when there is only one.
+    On Windows, that extra process makes DataLoader worker processes a nested
+    multiprocessing tree. Calling ``run`` directly for one GPU removes that
+    limitation while preserving upstream multi-GPU behavior.
     """
     train_py = BACKEND_DIR / "train.py"
     if not train_py.is_file():
         return
     original = train_py.read_text(encoding="utf-8")
-    patched = original.replace("torch.backends.cudnn.benchmark = True", "torch.backends.cudnn.benchmark = False")
+    if "if n_gpus == 1:\n        run(0, n_gpus, hps)" in original:
+        return
+    old = '''    mp.spawn(
+        run,
+        nprocs=n_gpus,
+        args=(
+            n_gpus,
+            hps,
+        ),
+    )'''
+    new = '''    if n_gpus == 1:
+        run(0, n_gpus, hps)
+    else:
+        mp.spawn(
+            run,
+            nprocs=n_gpus,
+            args=(
+                n_gpus,
+                hps,
+            ),
+        )'''
+    if old not in original:
+        print("Warning: could not find the mp.spawn block; skipping single-GPU launch patch.")
+        return
+    train_py.write_text(original.replace(old, new, 1), encoding="utf-8")
+    print(f"Patched {train_py.name}: direct single-GPU launch enabled.")
+
+
+def patch_cudnn_benchmark(enabled):
+    """Set cuDNN autotuning explicitly for reproducible performance tests."""
+    train_py = BACKEND_DIR / "train.py"
+    if not train_py.is_file():
+        return
+    original = train_py.read_text(encoding="utf-8")
+    value = "True" if enabled else "False"
+    patched, count = re.subn(
+        r"torch\.backends\.cudnn\.benchmark\s*=\s*(?:True|False)",
+        f"torch.backends.cudnn.benchmark = {value}",
+        original,
+        count=1,
+    )
+    if count == 0:
+        print(f"Warning: no cuDNN benchmark setting found in {train_py.name}; skipping patch.")
+        return
     if patched != original:
-        print(f"Patched {train_py.name}: torch.backends.cudnn.benchmark -> False (prevent spiky GPU usage).")
+        print(f"Patched {train_py.name}: torch.backends.cudnn.benchmark -> {value}.")
         train_py.write_text(patched, encoding="utf-8")
 
 
-def verify_windows_patches():
+def verify_windows_patches(cudnn_benchmark):
     """Fail loudly if any Windows compatibility patch didn't actually stick.
 
     Every patch function above is a best-effort text rewrite of a third-party
@@ -294,8 +347,13 @@ def verify_windows_patches():
         problems.append("DDP-bypass class was not inserted into train.py.")
     if re.search(r"DDP\(\s*net_g\s*,", text):
         problems.append("DDP-bypass patch did not apply (still finds 'DDP(net_g, ...)').")
-    if "torch.backends.cudnn.benchmark = True" in text:
-        problems.append("cuDNN benchmark patch did not apply (still finds 'benchmark = True').")
+    expected_cudnn = "True" if cudnn_benchmark else "False"
+    if f"torch.backends.cudnn.benchmark = {expected_cudnn}" not in text:
+        problems.append(
+            f"cuDNN benchmark patch did not apply (expected 'benchmark = {expected_cudnn}')."
+        )
+    if "if n_gpus == 1:\n        run(0, n_gpus, hps)" not in text:
+        problems.append("single-GPU launch patch did not apply (mp.spawn is still used for one GPU).")
     if problems:
         raise RuntimeError(
             "Windows compatibility patches did not fully apply to "
@@ -468,8 +526,9 @@ def main():
     patch_windows_distributed_backend()
     patch_find_unused_parameters()
     patch_skip_ddp_single_gpu()
-    patch_cudnn_benchmark()
-    verify_windows_patches()
+    patch_single_gpu_spawn()
+    patch_cudnn_benchmark(args.cudnn_benchmark)
+    verify_windows_patches(args.cudnn_benchmark)
     dataset_dir = Path(args.dataset_dir)
     records = read_metadata(dataset_dir / args.metadata, dataset_dir)
     validate_symbols(records)
