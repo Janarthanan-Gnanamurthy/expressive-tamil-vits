@@ -1,7 +1,7 @@
 # TTS
 huggingface-hub
 nemo-toolkit
-numpy
+numpy<2
 scipy
 torch
 torchaudio
@@ -19,3 +19,6 @@ peft
 accelerate
 Unidecode
 phonemizer
+matplotlib==3.7.2
+tensorboard
+epitran
